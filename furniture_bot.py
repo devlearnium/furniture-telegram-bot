@@ -496,9 +496,11 @@ class FurnitureBot:
         """Админ клавиатура"""
         keyboard = [
             [InlineKeyboardButton("➕ Добавить товар", callback_data="add_product")],
+            [InlineKeyboardButton("📋 Управление товарами", callback_data="manage_products")],
             [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats"),
              InlineKeyboardButton("📋 Заказы", callback_data="admin_orders")],
-            [InlineKeyboardButton("🏠 Главная", callback_data="main_menu")]
+            [InlineKeyboardButton("📋 Каталог", callback_data="catalog"),
+             InlineKeyboardButton("🏠 Главная", callback_data="main_menu")]
         ]
         return InlineKeyboardMarkup(keyboard)
     
@@ -690,9 +692,12 @@ class FurnitureBot:
             await query.answer("❌ Товар не найден", show_alert=True)
             return PRODUCT_VIEW
         
-        self.db.add_to_cart(user_id, product_id)
-        
-        await query.answer(f"✅ {product.name} добавлен в корзину!", show_alert=True)
+        try:
+            self.db.add_to_cart(user_id, product_id)
+            await query.answer(f"✅ {product.name} добавлен в корзину!", show_alert=True)
+        except Exception as e:
+            logger.error(f"Error adding to cart: {e}")
+            await query.answer("❌ Ошибка при добавлении в корзину", show_alert=True)
         
         return PRODUCT_VIEW
     
@@ -982,12 +987,161 @@ class FurnitureBot:
 ⚙️ *Панель администратора*
 
 Управление каталогом и заказами:
+
+➕ Добавление новых товаров
+📋 Управление существующими товарами  
+📊 Просмотр статистики
+📋 Обработка заказов
 """
         
         await query.edit_message_text(
             text,
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=self.get_admin_keyboard()
+        )
+        
+        return ADMIN_MENU
+    
+    async def manage_products(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Управление товарами"""
+        query = update.callback_query
+        await query.answer()
+        
+        if not self.is_admin(query.from_user.id):
+            await query.answer("❌ Нет доступа", show_alert=True)
+            return ADMIN_MENU
+        
+        text = """
+📋 *Управление товарами*
+
+Выберите категорию для управления товарами:
+"""
+        
+        await query.edit_message_text(
+            text,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=self.get_categories_keyboard()
+        )
+        
+        return CATALOG
+    
+    async def admin_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Показать статистику"""
+        query = update.callback_query
+        await query.answer()
+        
+        if not self.is_admin(query.from_user.id):
+            await query.answer("❌ Нет доступа", show_alert=True)
+            return ADMIN_MENU
+        
+        # Получаем статистику из базы
+        conn = sqlite3.connect(self.db.db_name)
+        cursor = conn.cursor()
+        
+        # Количество товаров
+        cursor.execute('SELECT COUNT(*) FROM products WHERE is_active = TRUE')
+        products_count = cursor.fetchone()[0]
+        
+        # Количество пользователей
+        cursor.execute('SELECT COUNT(*) FROM users')
+        users_count = cursor.fetchone()[0]
+        
+        # Количество заказов
+        cursor.execute('SELECT COUNT(*) FROM orders')
+        orders_count = cursor.fetchone()[0]
+        
+        # Товары по категориям
+        cursor.execute('''
+            SELECT category, COUNT(*) 
+            FROM products 
+            WHERE is_active = TRUE 
+            GROUP BY category
+        ''')
+        categories_stats = cursor.fetchall()
+        
+        conn.close()
+        
+        text = f"""
+📊 *Статистика магазина*
+
+📦 Всего товаров: {products_count}
+👥 Пользователей: {users_count}
+📋 Заказов: {orders_count}
+
+📋 *По категориям:*
+"""
+        
+        for cat_name, count in categories_stats:
+            text += f"• {cat_name}: {count} товаров\n"
+        
+        keyboard = [
+            [InlineKeyboardButton("⚙️ Админ панель", callback_data="admin")],
+            [InlineKeyboardButton("🏠 Главная", callback_data="main_menu")]
+        ]
+        
+        await query.edit_message_text(
+            text,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        
+        return ADMIN_MENU
+    
+    async def admin_orders(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Показать заказы"""
+        query = update.callback_query
+        await query.answer()
+        
+        if not self.is_admin(query.from_user.id):
+            await query.answer("❌ Нет доступа", show_alert=True)
+            return ADMIN_MENU
+        
+        # Получаем последние заказы
+        conn = sqlite3.connect(self.db.db_name)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT o.id, o.total_amount, o.phone, o.created_at, o.status,
+                   u.first_name, u.username
+            FROM orders o
+            LEFT JOIN users u ON o.user_id = u.id
+            ORDER BY o.created_at DESC
+            LIMIT 10
+        ''')
+        
+        orders = cursor.fetchall()
+        conn.close()
+        
+        if not orders:
+            text = "📋 *Заказы*\n\nЗаказов пока нет."
+        else:
+            text = "📋 *Последние заказы:*\n\n"
+            
+            for order in orders:
+                order_id, total, phone, created_at, status, first_name, username = order
+                
+                # Форматируем дату
+                try:
+                    date = datetime.fromisoformat(created_at).strftime("%d.%m.%Y %H:%M")
+                except:
+                    date = created_at
+                
+                text += f"🆔 Заказ #{order_id}\n"
+                text += f"👤 {first_name or 'Неизвестно'} (@{username or 'нет'})\n"
+                text += f"💰 {self.format_price(total)}\n"
+                text += f"📞 {phone}\n"
+                text += f"📅 {date}\n"
+                text += f"🟢 Статус: {status}\n\n"
+        
+        keyboard = [
+            [InlineKeyboardButton("⚙️ Админ панель", callback_data="admin")],
+            [InlineKeyboardButton("🏠 Главная", callback_data="main_menu")]
+        ]
+        
+        await query.edit_message_text(
+            text,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
         
         return ADMIN_MENU
@@ -1140,6 +1294,8 @@ class FurnitureBot:
 💰 Цена: {self.format_price(product.price)}
 🏷️ Категория: {product.category}
 🖼️ Изображений: {len(product.images)}
+
+Товар доступен в каталоге!
 """
             except Exception as e:
                 logger.error(f"Error saving product: {e}")
@@ -1150,6 +1306,7 @@ class FurnitureBot:
         
         keyboard = [
             [InlineKeyboardButton("➕ Добавить еще товар", callback_data="add_product")],
+            [InlineKeyboardButton("📋 Каталог", callback_data="catalog")],
             [InlineKeyboardButton("⚙️ Админ панель", callback_data="admin")]
         ]
         
@@ -1205,14 +1362,29 @@ class FurnitureBot:
         product_id = int(query.data.replace("confirm_delete_", ""))
         
         try:
+            product = self.db.get_product_by_id(product_id)
             self.db.delete_product(product_id)
             await query.answer("✅ Товар удален", show_alert=True)
             
             # Возвращаемся к категории
-            category = context.user_data.get('current_category')
+            category = context.user_data.get('current_category', product.category if product else None)
             if category:
-                return await self.show_category(update, context)
+                # Показываем обновленный список товаров
+                products = self.db.get_products_by_category(category)
+                
+                if not products:
+                    text = f"📋 *{category}*\n\nВ этой категории больше нет товаров."
+                else:
+                    text = f"📋 *{category}*\n\nВыберите товар:"
+                
+                await query.edit_message_text(
+                    text,
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=self.get_products_keyboard(category, 0)
+                )
+                return CATALOG
             else:
+                # Возвращаемся к каталогу
                 return await self.catalog(update, context)
                 
         except Exception as e:
@@ -1227,8 +1399,22 @@ class FurnitureBot:
         
         category = context.user_data.get('current_category')
         if category:
-            return await self.show_category(update, context)
+            # Возвращаемся к товарам текущей категории
+            products = self.db.get_products_by_category(category)
+            
+            if not products:
+                text = f"📋 *{category}*\n\nВ этой категории пока нет товаров."
+            else:
+                text = f"📋 *{category}*\n\nВыберите товар:"
+            
+            await query.edit_message_text(
+                text,
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=self.get_products_keyboard(category, 0)
+            )
+            return CATALOG
         else:
+            # Возвращаемся к каталогу категорий
             return await self.catalog(update, context)
     
     # Обработка ошибок и отмены
@@ -1245,13 +1431,36 @@ class FurnitureBot:
         """Обработчик ошибок"""
         logger.error(f"Update {update} caused error {context.error}")
         
+        # Получаем детали ошибки
+        import traceback
+        tb_string = ''.join(traceback.format_exception(type(context.error), context.error, context.error.__traceback__))
+        logger.error(f"Full traceback:\n{tb_string}")
+        
         if isinstance(update, Update) and update.effective_message:
             try:
+                # Определяем тип ошибки для пользователя
+                error_msg = "❌ Произошла ошибка. "
+                
+                if "timeout" in str(context.error).lower():
+                    error_msg += "Превышено время ожидания. Попробуйте еще раз."
+                elif "network" in str(context.error).lower():
+                    error_msg += "Проблема с сетью. Попробуйте позже."
+                elif "file_id" in str(context.error).lower():
+                    error_msg += "Проблема с изображением. Попробуйте загрузить другое."
+                else:
+                    error_msg += "Попробуйте еще раз или обратитесь к администратору."
+                
+                keyboard = [
+                    [InlineKeyboardButton("🏠 Главная", callback_data="main_menu")],
+                    [InlineKeyboardButton("📋 Каталог", callback_data="catalog")]
+                ]
+                
                 await update.effective_message.reply_text(
-                    "❌ Произошла ошибка. Попробуйте еще раз или обратитесь к администратору."
+                    error_msg,
+                    reply_markup=InlineKeyboardMarkup(keyboard)
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"Error in error handler: {e}")
 
 def main():
     """Главная функция запуска бота"""
@@ -1305,6 +1514,10 @@ def main():
             ],
             ADMIN_MENU: [
                 CallbackQueryHandler(bot.start_add_product, pattern="^add_product$"),
+                CallbackQueryHandler(bot.manage_products, pattern="^manage_products$"),
+                CallbackQueryHandler(bot.admin_stats, pattern="^admin_stats$"),
+                CallbackQueryHandler(bot.admin_orders, pattern="^admin_orders$"),
+                CallbackQueryHandler(bot.catalog, pattern="^catalog$"),
                 CallbackQueryHandler(bot.main_menu, pattern="^main_menu$"),
             ],
             WAITING_NAME: [
